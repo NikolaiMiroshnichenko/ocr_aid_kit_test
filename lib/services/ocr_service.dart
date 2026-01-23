@@ -1,7 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
-import 'package:ocr_aid_kit_test/constants.dart';
+
+import '../constants.dart';
 
 class CloudOCRService {
 

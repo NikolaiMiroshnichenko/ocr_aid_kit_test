@@ -1,7 +1,9 @@
-import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart'; 
 import 'package:image_picker/image_picker.dart';
-import 'package:ocr_aid_kit_test/services/ocr_service.dart';
+
+import 'models/medicine.dart';
+import 'services/gemeni_service_v2.dart';
 
 void main() {
   runApp(const MyApp());
@@ -33,121 +35,150 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  File? _image;
-  String _resultText = "Recognized text will appear here";
+  Uint8List? _imageBytes; // Используем байты вместо File для скорости
+  List<Medicine> _medicines = []; // Список распознанных лекарств
   bool _isLoading = false;
 
-  final CloudOCRService _ocrService = CloudOCRService();
+  final MedicineScannerService _service = MedicineScannerService();
   final ImagePicker _picker = ImagePicker();
 
-  // Function to pick image from camera or gallery
+// В классе _MyHomePageState
   Future<void> _pickImage(ImageSource source) async {
-    final XFile? pickedFile = await _picker.pickImage(source: source);
+    final XFile? pickedFile = await _picker.pickImage(
+      source: source,
+      imageQuality: 30,
+      maxWidth: 600,
+    );
 
-    if (pickedFile != null) {
+    if (pickedFile == null) return;
+
+    setState(() {
+      _isLoading = true;
+      _medicines = [];
+    });
+
+    try {
+      final bytes = await pickedFile.readAsBytes();
+
+      // Замеряем время для дебага (опционально)
+      final stopwatch = Stopwatch()..start();
+
+      final List<dynamic> jsonList = await _service.scanImage(bytes);
+
+      print("Сканирование заняло: ${stopwatch.elapsed.inSeconds} сек.");
+
       setState(() {
-        _image = File(pickedFile.path);
-        _isLoading = true;
-        _resultText = "Processing...";
+        _medicines = jsonList.map((m) => Medicine.fromJson(m)).toList();
       });
 
-      try {
-        final text = await _ocrService.recognizeText(_image!);
-        setState(() {
-          _resultText = text;
-        });
-      } catch (e) {
-        setState(() {
-          _resultText = "An error occurred: $e";
-        });
-      } finally {
-        setState(() {
-          _isLoading = false;
-        });
-      }
+    } catch (e) {
+      _showSnackBar("Ошибка: $e");
+    } finally {
+      setState(() => _isLoading = false);
     }
   }
 
-  // Show selection menu: Camera or Gallery
-  void _showPickerOptions() {
-    showModalBottomSheet(
-      context: context,
-      builder: (context) => SafeArea(
-        child: Wrap(
-          children: [
-            ListTile(
-              leading: const Icon(Icons.photo_library),
-              title: const Text('Gallery'),
-              onTap: () {
-                _pickImage(ImageSource.gallery);
-                Navigator.of(context).pop();
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.photo_camera),
-              title: const Text('Camera'),
-              onTap: () {
-                _pickImage(ImageSource.camera);
-                Navigator.of(context).pop();
-              },
-            ),
-          ],
-        ),
-      ),
-    );
+  void _showSnackBar(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        title: Text(widget.title),
+        title: const Text("📸 AI Аптечка"),
+        centerTitle: true,
+        elevation: 2,
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: <Widget>[
-            // Image Preview Area
-            Container(
-              width: double.infinity,
-              height: 250,
-              decoration: BoxDecoration(
-                color: Colors.grey[200],
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: _image != null
-                  ? ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: Image.file(_image!, fit: BoxFit.cover),
-              )
-                  : const Icon(Icons.image, size: 80, color: Colors.grey),
-            ),
-            const SizedBox(height: 20),
-
-            // Loading Indicator or Result Text
-            if (_isLoading)
-              const CircularProgressIndicator()
-            else
-              Card(
-                elevation: 4,
-                child: Padding(
-                  padding: const EdgeInsets.all(12.0),
-                  child: SelectableText(
-                    _resultText,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 16),
-                  ),
-                ),
-              ),
-          ],
-        ),
+      body: Column(
+        children: [
+          _buildImagePreview(),
+          const Divider(height: 1),
+          Expanded(child: _buildResultArea()),
+        ],
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _showPickerOptions,
-        label: const Text("Scan Text"),
-        icon: const Icon(Icons.add_a_photo),
+        label: const Text("Сканировать"),
+        icon: const Icon(Icons.document_scanner),
       ),
+    );
+  }
+
+  Widget _buildImagePreview() {
+    return Container(
+      width: double.infinity,
+      height: 200,
+      color: Colors.black12,
+      child: _imageBytes != null
+          ? Image.memory(_imageBytes!, fit: BoxFit.cover)
+          : const Center(child: Text("Нет изображения")),
+    );
+  }
+
+  Widget _buildResultArea() {
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_medicines.isEmpty) {
+      return const Center(
+        child: Text("Нажмите на кнопку, чтобы начать поиск лекарств"),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(12),
+      itemCount: _medicines.length,
+      itemBuilder: (context, index) {
+        final med = _medicines[index];
+        return Card(
+          margin: const EdgeInsets.only(bottom: 12),
+          child: ListTile(
+            leading: CircleAvatar(
+              child: Icon(_getCategoryIcon(med.category)),
+            ),
+            title: Text(med.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+            subtitle: Text("${med.dosage} • ${med.category}"),
+            trailing: Text(med.date, style: const TextStyle(color: Colors.redAccent)),
+          ),
+        );
+      },
+    );
+  }
+
+  IconData _getCategoryIcon(String category) {
+    if (category.toLowerCase().contains('анальгетик')) return Icons.healing;
+    if (category.toLowerCase().contains('витамин')) return Icons.wb_sunny;
+    return Icons.medication;
+  }
+
+  void _showPickerOptions() {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) =>
+          SafeArea(
+            child: Wrap(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.photo_library),
+                  title: const Text('Gallery'),
+                  onTap: () {
+                    _pickImage(ImageSource.gallery);
+                    Navigator.of(context).pop();
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.photo_camera),
+                  title: const Text('Camera'),
+                  onTap: () {
+                    _pickImage(ImageSource.camera);
+                    Navigator.of(context).pop();
+                  },
+                ),
+              ],
+            ),
+          ),
     );
   }
 }
